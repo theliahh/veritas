@@ -10,7 +10,7 @@ Veritas is a damage logger/meter for Honkai: Star Rail, built as a Windows-only 
 
 - Toolchain is pinned to `nightly-2025-05-17` (`rust-toolchain.toml`); the crate uses nightly features (`windows_process_extensions_show_window`) and edition 2024.
 - Build: `cargo build --release` → `target/release/veritas.dll`. This is the only thing CI runs (on PRs to `main`); there is no lint/fmt step in CI. Requires MSVC Build Tools (C++ workload): `build.rs` compiles `src/guard.c` with the `cc` crate.
-- `Cargo.toml` has a `[patch]` pointing `edio11` at a local checkout in `../edio11-rs` (branch `fix-thread-race`); the build fails without that directory until the fix is upstreamed and the pinned `rev` bumped.
+- `edio11` comes from a fork, `theliahh/edio11-rs` (branch `fix-thread-race`), pinned by `rev` in `Cargo.toml`; overlay-library changes go there, then bump the `rev`.
 - Debug builds allocate a console window on injection (`AllocConsole` under `debug_assertions`) and log at Debug level (the debug log grows ~10 MB per session).
 - Tests: `tests::egui_main` in `src/lib.rs` runs the overlay UI standalone in an `eframe` window (no game needed; blocks until closed) — `cargo test egui_main`. `cargo test --lib guarded_call` runs the IL2CPP exception-guard test. The DLL entry point is `#[cfg(not(test))]`, so tests don't try to hook anything.
 - Debugging against the game: `.vscode/launch.json` has an LLDB "Attach to Process" config.

@@ -1408,6 +1408,7 @@ dependencies = [
 [[package]]
 name = "edio11"
 version = "0.1.1"
+source = "git+https://github.com/theliahh/edio11-rs.git?rev=c69a210#c69a210d4e9e73f4bf647ef4e5535ce289e0fd31"
 dependencies = [
  "arboard",
  "dark-light",
