@@ -23,12 +23,11 @@ use il2cpp_runtime::api::il2cpp_field_get_offset;
 use il2cpp_runtime::api::il2cpp_field_get_type;
 use il2cpp_runtime::get_cached_class;
 use il2cpp_runtime::types::Il2CppString;
-use il2cpp_runtime::types::System_Enum;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::ptr::null;
-use std::str::FromStr;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 #[named]
 unsafe fn get_elapsed_av(game_mode: RPG_GameCore_TurnBasedGameMode) -> Result<f64> {
@@ -54,8 +53,7 @@ static COMBO_FIELD_OFFSETS: OnceLock<ComboFieldOffsets> = OnceLock::new();
 fn parse_il2cpp_enum<TObj, TEnum>(enum_obj: TObj) -> Result<TEnum>
 where
     TObj: Il2CppObject,
-    TEnum: FromStr,
-    <TEnum as FromStr>::Err: std::fmt::Display,
+    TEnum: Copy,
 {
     let ty = helpers::get_type_handle(enum_obj.get_class().qualified_name())?;
     let name = unsafe { System_Enum::get_name(ty, enum_obj.as_ptr()) }?;
@@ -134,6 +132,10 @@ unsafe fn get_combo_field_offsets(class: Il2CppClass) -> Result<ComboFieldOffset
 }
 
 unsafe fn resolve_attack_type_offset(class: Il2CppClass) -> Result<usize> {
+    const NCJILFFNINI_ATTACK_TYPE_OFFSET: usize = 0x4c0;
+    const NCJILFFNINI_ATTACK_TYPE_FIELD_NAME: &str = "JLCBDNLOHGI";
+
+    let class_name = class.name();
     let field_iter: *const c_void = null();
     loop {
         log::debug!("{}", class.qualified_name());
@@ -142,14 +144,25 @@ unsafe fn resolve_attack_type_offset(class: Il2CppClass) -> Result<usize> {
             break;
         }
 
+        let field_offset = il2cpp_field_get_offset(field) as usize;
+        let field_name = unsafe { il2cpp_runtime::utils::cstr_to_str(il2cpp_field_get_name(field)) };
         let field_type = il2cpp_field_get_type(field);
-        if field_type.name() == "RPG.GameCore.AttackType" {
-            return Ok(il2cpp_field_get_offset(field) as usize);
+        let field_type_name = field_type.name();
+        if field_type_name == "AttackType"
+            || field_type_name.ends_with(".AttackType")
+            || (class_name == "NCJILFFNINI" && field_name == NCJILFFNINI_ATTACK_TYPE_FIELD_NAME)
+        {
+            return Ok(field_offset);
         }
     }
 
+    if class_name == "NCJILFFNINI" {
+        return Ok(NCJILFFNINI_ATTACK_TYPE_OFFSET);
+    }
+
     Err(anyhow!(
-        "Failed to find RPG.GameCore.AttackType field offset in damage info"
+        "Failed to find AttackType field offset in damage info class {}",
+        class_name
     ))
 }
 
@@ -269,8 +282,9 @@ fn on_damage(
                     }
                 };
 
-                let attack_owner_entity_value: RPG_GameCore_EntityType =
-                    parse_il2cpp_enum(attack_owner._EntityType()?)?;
+        if damage <= 0.0 {
+            return Ok(());
+        }
 
                 match attack_owner_entity_value {
                     RPG_GameCore_EntityType::Avatar => {
@@ -347,9 +361,7 @@ fn on_damage(
             }
             _ => {}
         }
-        if let Some(event) = event {
-            BattleContext::handle_event(event);
-        }
+
         Ok(())
     });
 
@@ -367,7 +379,6 @@ fn on_use_skill(
     a6: *const c_void,
     skill_extra_use_param: i32,
 ) -> bool {
-    log::debug!(function_name!());
     let res =
         ON_USE_SKILL_Detour.call(instance, skill_index, a3, a4, a5, a6, skill_extra_use_param);
 
@@ -450,16 +461,16 @@ fn on_use_skill(
                             event = Some(e);
                         }
                         RPG_GameCore_EntityType::BattleEvent => {
-                            // let battle_event_data_comp = RPG_GameCore_BattleEventDataComponent(
-                            //     instance._CharacterDataRef()?.Summoner()?,
-                            // );
-
-                            // let avatar_entity =
-                            //     battle_event_data_comp._SourceCaster_k__BackingField()?;
-                            let avatar_entity = instance._CharacterDataRef()?.Summoner()?;
+                            let battle_event_data_comp = RPG_GameCore_BattleEventDataComponent(
+                                instance._CharacterDataRef()?.0,
+                            );
+                            let avatar_entity = match battle_event_data_comp._SourceCaster_k__BackingField() {
+                                Ok(e) if !e.0.is_null() => e,
+                                _ => return Ok(()), // SourceCaster not set; skip silently
+                            };
 
                             let e = match get_skill_from_skilldata(skill_data) {
-                                Ok(skill) => match get_avatar_from_entity(avatar_entity) {
+                                Ok(skill) => match get_avatar_from_owner_entity(avatar_entity) {
                                     Ok(avatar) => Ok(Event::OnUseSkill(OnUseSkillEvent {
                                         avatar: Entity {
                                             uid: avatar.id,
@@ -513,7 +524,6 @@ fn on_use_skill(
 // Insert skills are out of turn automatic skills
 #[named]
 fn on_combo(instance: *const c_void, game_mode: RPG_GameCore_TurnBasedGameMode) {
-    log::debug!(function_name!());
 
     ON_COMBO_Detour.call(instance, game_mode);
     safe_call!(unsafe {
@@ -553,14 +563,14 @@ fn on_combo(instance: *const c_void, game_mode: RPG_GameCore_TurnBasedGameMode) 
         let ability_name_container =
             *((instance.byte_offset(offsets.ability_name_outer as isize)) as *const *const c_void);
         if ability_name_container.is_null() {
-            return Err(anyhow!("on_combo resolved null ability name container"));
+            return Ok(());
         }
 
         let ability_name_ptr = *(ability_name_container
             .byte_offset(offsets.ability_name_inner as isize)
             as *const *const c_void);
         if ability_name_ptr.is_null() {
-            return Err(anyhow!("on_combo resolved null ability name"));
+            return Ok(());
         }
 
         let ability_name = Il2CppString(ability_name_ptr);
@@ -664,11 +674,13 @@ fn on_combo(instance: *const c_void, game_mode: RPG_GameCore_TurnBasedGameMode) 
                             let battle_event_data_comp = RPG_GameCore_BattleEventDataComponent(
                                 skill_character_component._CharacterDataRef()?.0,
                             );
-                            let avatar_entity =
-                                battle_event_data_comp._SourceCaster_k__BackingField()?;
+                            let avatar_entity = match battle_event_data_comp._SourceCaster_k__BackingField() {
+                                Ok(e) if !e.0.is_null() => e,
+                                _ => return Ok(()), // SourceCaster not set; skip silently
+                            };
 
                             let e = match get_skill_from_skilldata(skill_data) {
-                                Ok(skill) => match get_avatar_from_entity(avatar_entity) {
+                                Ok(skill) => match get_avatar_from_owner_entity(avatar_entity) {
                                     Ok(avatar) => Ok(Event::OnUseSkill(OnUseSkillEvent {
                                         avatar: Entity {
                                             uid: avatar.id,
@@ -726,7 +738,6 @@ fn on_set_lineup(
     a4: u32,
     a5: bool,
 ) {
-    log::debug!(function_name!());
     safe_call!(unsafe {
         let light_team = a2.LightTeam()?;
         let extra_team = a2.ExtraTeam()?;
@@ -756,8 +767,10 @@ fn on_set_lineup(
             &avatars.iter().map(|a| a.id).collect::<Vec<u32>>(),
         );
         crate::ui::helpers::clear_monster_buffers();
-        let property_kind = RPG_GameCore_AvatarPropertyType::BaseHP;
-        crate::ui::helpers::cache_property_buffer(property_kind);
+        crate::ui::helpers::clear_property_buffers();
+
+        let avatar_ids: Vec<u32> = avatars.iter().map(|a| a.id).collect();
+        crate::ui::helpers::populate_avatar_buffers(&avatar_ids);
 
         let event = if !errors.is_empty() {
             let errors = errors
@@ -776,7 +789,6 @@ fn on_set_lineup(
 
 #[named]
 fn on_battle_begin(instance: RPG_GameCore_TurnBasedGameMode) {
-    log::debug!(function_name!());
     let res = ON_BATTLE_BEGIN_Detour.call(instance);
     safe_call!({
         BattleContext::handle_event(Ok(Event::OnBattleBegin(OnBattleBeginEvent {
@@ -793,7 +805,6 @@ fn on_battle_begin(instance: RPG_GameCore_TurnBasedGameMode) {
 
 #[named]
 fn on_battle_end(instance: RPG_GameCore_TurnBasedGameMode) {
-    log::debug!(function_name!());
     let res = ON_BATTLE_END_Detour.call(instance);
     BattleContext::handle_event(Ok(Event::OnBattleEnd));
     res
@@ -801,7 +812,6 @@ fn on_battle_end(instance: RPG_GameCore_TurnBasedGameMode) {
 
 #[named]
 fn on_turn_begin(instance: RPG_GameCore_TurnBasedGameMode) {
-    log::debug!(function_name!());
     // Update AV first
     let res = ON_TURN_BEGIN_Detour.call(instance);
 
@@ -853,7 +863,6 @@ fn on_turn_begin(instance: RPG_GameCore_TurnBasedGameMode) {
 
 #[named]
 fn on_turn_end(instance: RPG_GameCore_TurnBasedAbilityComponent, a1: i32) {
-    log::debug!(function_name!());
     // Can match player v enemy turn w/
     // RPG.GameCore.TurnBasedGameMode.GetCurrentTurnTeam
     BattleContext::handle_event(Ok(Event::OnTurnEnd));
@@ -874,7 +883,6 @@ pub fn on_update_wave(instance: RPG_GameCore_TurnBasedGameMode) {
 
 #[named]
 pub fn on_update_cycle(instance: RPG_GameCore_TurnBasedGameMode) -> u32 {
-    log::debug!(function_name!());
     let cycle = ON_UPDATE_CYCLE_Detour.call(instance);
     BattleContext::handle_event(Ok(Event::OnUpdateCycle(OnUpdateCycleEvent { cycle })));
     cycle
@@ -882,7 +890,6 @@ pub fn on_update_cycle(instance: RPG_GameCore_TurnBasedGameMode) -> u32 {
 
 #[named]
 fn handle_hp_change(turn_based_ability_component: RPG_GameCore_TurnBasedAbilityComponent) {
-    log::debug!(function_name!());
     use std::string::ToString;
     safe_call!(unsafe {
         let property_kind = RPG_GameCore_AbilityProperty::CurrentHP.to_string();
@@ -956,8 +963,52 @@ pub fn on_direct_damage_hp(
     a5: *const c_void,
     a6: i32
 ) {
-    log::debug!(function_name!());
-    let res = ON_DIRECT_DAMAGE_HP_Detour.call(instance, a1, a2, a3, a4, a5, a6);
+
+    let hp_before_raw = unsafe { instance.get_property(RPG_GameCore_AbilityProperty::CurrentHP) }
+        .ok()
+        .map(|fp| fixpoint_to_raw(&fp))
+        .unwrap_or(0.0);
+
+    let res = ON_DIRECT_DAMAGE_HP_Detour.call(instance, a1, a2, a3, a4, a5);
+
+    let hp_after_raw = unsafe { instance.get_property(RPG_GameCore_AbilityProperty::CurrentHP) }
+        .ok()
+        .map(|fp| fixpoint_to_raw(&fp))
+        .unwrap_or(0.0);
+
+    safe_call!(unsafe {
+        let defender = instance.as_base()._OwnerRef()?;
+        let defender_uid: u32 = (*defender._RuntimeID_k__BackingField()?).into();
+
+        let pending = pending_damage_contexts()
+            .lock()
+            .ok()
+            .and_then(|mut map| map.get_mut(&defender_uid).and_then(|q| q.pop_front()));
+
+        if let Some(ctx) = pending {
+            let hp_damage = (hp_before_raw - hp_after_raw).max(0.0);
+            // Only emit finalized damage from observed post-mutation HP delta.
+            // Falling back to raw getter here can duplicate hits when DirectDamageHP
+            // is invoked multiple times for the same queued record.
+            if hp_damage > 0.0 {
+                let overkill_damage = if hp_after_raw <= 0.0 {
+                    (ctx.raw_damage.max(hp_damage) - ctx.hp_before_raw).max(0.0)
+                } else {
+                    0.0
+                };
+
+                BattleContext::handle_event(Ok(Event::OnDamage(OnDamageEvent {
+                    attacker: ctx.attacker,
+                    damage: hp_damage,
+                    overkill_damage,
+                    r#type: ctx.r#type,
+                })));
+            }
+        }
+
+        Ok(())
+    });
+
     handle_hp_change(instance);
     res
 }
@@ -970,7 +1021,6 @@ pub fn on_stat_change(
     new_stat: RPG_GameCore_FixPoint,
     a4: *const c_void,
 ) -> bool {
-    log::debug!(function_name!());
     let res = ON_STAT_CHANGE_Detour.call(instance, property, a2, new_stat, a4);
     safe_call!(unsafe {
         let entity = instance.as_base()._OwnerRef()?;
@@ -1144,7 +1194,6 @@ unsafe fn get_entity_defeated_offsets() -> Result<EntityDefeatedOffsets> {
 
 #[named]
 pub fn on_entity_defeated(instance: RPG_GameCore_TurnBasedGameMode, a2: *const c_void) -> bool {
-    log::debug!(function_name!());
     let res = ON_ENTITY_DEFEATED_Detour.call(instance, a2);
 
     safe_call!(unsafe {
@@ -1190,7 +1239,6 @@ pub fn on_entity_defeated(instance: RPG_GameCore_TurnBasedGameMode, a2: *const c
 
 #[named]
 pub fn on_update_team_formation(instance: RPG_GameCore_TeamFormationComponent) {
-    log::debug!(function_name!());
     let res = ON_UPDATE_TEAM_FORMATION_Detour.call(instance);
     safe_call!({
         let team_value: RPG_GameCore_TeamType = parse_il2cpp_enum(instance._Team()?)?;
@@ -1228,7 +1276,6 @@ pub fn on_initialize_enemy(
     instance: RPG_GameCore_MonsterDataComponent,
     turn_based_ability_component: RPG_GameCore_TurnBasedAbilityComponent,
 ) {
-    log::debug!(function_name!());
     let res = ON_INITIALIZE_ENEMY_Detour.call(instance, turn_based_ability_component);
     safe_call!({
         let row_data = instance._MonsterRowData()?;
@@ -1256,12 +1303,13 @@ pub fn on_initialize_enemy(
 
         BattleContext::handle_event(Ok(Event::OnInitializeEnemy(OnInitializeEnemyEvent {
             enemy: Enemy {
-                id: monster_id,
+                id: monster_template_id,
                 uid: (*entity._RuntimeID_k__BackingField().unwrap()).into(),
                 name: (*monster_name).to_string(),
                 base_stats,
             },
         })));
+        crate::ui::helpers::cache_monster_buffer(monster_template_id);
         Ok(())
     });
     res
@@ -1336,18 +1384,20 @@ pub fn subscribe() -> Result<()> {
         }
 
         if let Some(method) = on_combo_method {
-            subscribe_function!(ON_COMBO_Detour, method.va(), on_combo)?;
+            subscribe_function!(ON_COMBO_Detour, method.va(), on_combo)
+                .context("Failed to initialize on_combo detour")?;
         } else {
             return Err(anyhow!("Failed to find on_combo method"));
         }
 
         if let Some(class) = combo_instance_class {
-            get_combo_field_offsets(class)?;
+            get_combo_field_offsets(class).context("Failed to resolve on_combo field offsets")?;
         }
 
-        let defeated_offsets = resolve_defeated_entity_offset()?;
+        let defeated_offsets =
+            resolve_defeated_entity_offset().context("Failed to resolve entity-defeated offsets")?;
         let _ = ENTITY_DEFEATED_OFFSETS.set(defeated_offsets);
-        get_entity_defeated_offsets()?;
+        get_entity_defeated_offsets().context("Failed to cache entity-defeated offsets")?;
 
         subscribe_function!(
             ON_USE_SKILL_Detour,
@@ -1436,7 +1486,6 @@ pub fn subscribe() -> Result<()> {
         subscribe_function!(
             ON_DIRECT_DAMAGE_HP_Detour,
             RPG_GameCore_TurnBasedAbilityComponent::get_class_static()?
-                // Not sure if I need keyword out
                 .find_method(
                     "DirectDamageHP",
                     vec![
@@ -1450,21 +1499,6 @@ pub fn subscribe() -> Result<()> {
                 )?
                 .va(),
             on_direct_damage_hp
-        )?;
-        subscribe_function!(
-            ON_STAT_CHANGE_Detour,
-            RPG_GameCore_TurnBasedAbilityComponent::get_class_static()?
-                .find_method(
-                    "ModifyProperty",
-                    vec![
-                        "RPG.GameCore.AbilityProperty",
-                        "RPG.GameCore.PropertyModifyFunction",
-                        "RPG.GameCore.FixPoint",
-                        "*"
-                    ]
-                )?
-                .va(),
-            on_stat_change
         )?;
         subscribe_function!(
             ON_ENTITY_DEFEATED_Detour,
@@ -1494,3 +1528,4 @@ pub fn subscribe() -> Result<()> {
         Ok(())
     }
 }
+
