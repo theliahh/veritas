@@ -33,8 +33,9 @@ fn sanitize_entity_name<S: AsRef<str>>(name: S) -> String {
     name.replace("<ub>", "").replace("</ub>", "")
 }
 
-static AVATAR_CACHE: LazyLock<Mutex<HashMap<u32, Avatar>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+pub fn get_textmap_content(hash: &RPG_Client_TextID) -> Result<String> {
+    Ok(unsafe { RPG_Client_TextmapStatic::get_text(hash, null()) }.map(|s| s.to_string())?)
+}
 
 
 #[named]
@@ -52,16 +53,10 @@ pub unsafe fn get_avatar_from_id(avatar_id: u32) -> Result<Avatar> {
 
     let avatar_name = unsafe { RPG_Client_AvatarHelper::GetAvatarName(avatar_id)?.to_string() };
 
-    let avatar = Avatar {
+    Ok(Avatar {
         id: avatar_id,
         name: sanitize_entity_name(avatar_name),
-    };
-
-    if let Ok(mut cache) = AVATAR_CACHE.lock() {
-        cache.insert(avatar_id, avatar.clone());
-    }
-
-    Ok(avatar)
+    })
 }
 
 #[named]
@@ -77,7 +72,11 @@ pub unsafe fn get_skill_from_skilldata(skill_data: RPG_GameCore_SkillData) -> Re
     let text_id = unsafe { row_data.get_SkillName()? };
 
     let skill_type = unsafe {
-        row_data.get_AttackType()?.to_string()
+        let boxed = RPG_GameCore_AttackType__Boxed(System_Enum::to_object_from_int(
+            get_type_handle("RPG.GameCore.AttackType")?,
+            row_data.get_AttackType()? as i32,
+        )?);
+        System_Enum::get_name(get_type_handle("RPG.GameCore.AttackType")?, boxed.0)?.to_string()
     };
 
     Ok(Skill {
@@ -97,40 +96,18 @@ pub unsafe fn get_avatar_from_entity(entity: RPG_GameCore_GameEntity) -> Result<
 
     let id = unsafe { RPG_Client_UIGameEntityUtils::get_avatar_id(entity) }
         .context("Failed to get AvatarID from GameEntity")?;
-    unsafe { get_avatar_from_id(id) }
-}
 
-#[named]
-pub unsafe fn get_avatar_from_owner_entity(entity: RPG_GameCore_GameEntity) -> Result<Avatar> {
-    log::debug!(function_name!());
+    let avatar_data =
+        get_avatar_data_from_id(id).context(format!("AvatarData with id {id} was null"))?;
 
     let name = unsafe {
         RPG_Client_AvatarHelper::GetAvatarName(id)?.to_string()
     };
 
-    match *entity._EntityType()? {
-        RPG_GameCore_EntityType::Avatar => unsafe { get_avatar_from_entity(entity) },
-        RPG_GameCore_EntityType::Servant | RPG_GameCore_EntityType::Snapshot => {
-            unsafe { get_avatar_from_servant_entity(entity) }
-        }
-        RPG_GameCore_EntityType::BattleEvent => {
-            let battle_event_data_comp = RPG_GameCore_BattleEventDataComponent(
-                unsafe { get_component_by_name(entity, "RPG.GameCore.BattleEventDataComponent")? }.0,
-            );
-
-            if battle_event_data_comp.0.is_null() {
-                return Err(anyhow!("entity does not have BattleEventDataComponent!"));
-            }
-
-            let source_caster = battle_event_data_comp._SourceCaster_k__BackingField()?;
-            if source_caster.0.is_null() || source_caster.0 == entity.0 {
-                return Err(anyhow!("BattleEvent source caster was null"));
-            }
-
-            unsafe { get_avatar_from_owner_entity(source_caster) }
-        }
-        _ => unsafe { get_avatar_from_entity(entity) },
-    }
+    Ok(Avatar {
+        id,
+        name: sanitize_entity_name(name),
+    })
 }
 
 #[named]
@@ -154,7 +131,12 @@ pub unsafe fn get_avatar_from_servant_entity(entity: RPG_GameCore_GameEntity) ->
 pub unsafe fn get_monster_from_entity(entity: RPG_GameCore_GameEntity) -> Result<Avatar> {
     log::debug!(function_name!());
     let monster_data_comp = RPG_GameCore_MonsterDataComponent(
-        unsafe { get_component_by_name(entity, "RPG.GameCore.MonsterDataComponent")? }.0,
+        unsafe {
+            entity.get_component(System_RuntimeType::from_name(
+                "RPG.GameCore.MonsterDataComponent",
+            )?)?
+        }
+        .0,
     );
 
     if monster_data_comp.0.is_null() {
@@ -163,10 +145,10 @@ pub unsafe fn get_monster_from_entity(entity: RPG_GameCore_GameEntity) -> Result
 
     let monster_name = monster_data_comp._MonsterRowData()?._Row()?.MonsterName()?;
 
-    let monster_template_id = unsafe { monster_data_comp.get_monster_template_id()? };
+    let monster_id = unsafe { monster_data_comp.get_monster_id()? };
 
     Ok(Avatar {
-        id: monster_template_id,
+        id: monster_id,
         name: sanitize_entity_name(get_textmap_content(&*monster_name)?),
     })
 }
@@ -175,7 +157,12 @@ pub unsafe fn get_monster_from_entity(entity: RPG_GameCore_GameEntity) -> Result
 pub unsafe fn get_servant_from_entity(entity: RPG_GameCore_GameEntity) -> Result<Avatar> {
     log::debug!(function_name!());
     let servant_data_comp = RPG_GameCore_ServantDataComponent(
-        unsafe { get_component_by_name(entity, "RPG.GameCore.ServantDataComponent")? }.0,
+        unsafe {
+            entity.get_component(System_RuntimeType::from_name(
+                "RPG.GameCore.ServantDataComponent",
+            )?)?
+        }
+        .0,
     );
 
     if servant_data_comp.0.is_null() {
@@ -440,36 +427,18 @@ unsafe fn render_texture_to_png_bytes(tex: UnityEngine_Texture2D) -> Result<Vec<
     }
 }
 
-unsafe fn load_texture_from_asset(asset_path: Il2CppString) -> Result<UnityEngine_Texture2D> {
-    if let Ok(sprite_type) = get_type_handle(UnityEngine_Sprite::ffi_name()) {
-        if let Ok(sprite_obj) =
-            unsafe { RPG_Client_CachedAssetLoader::SyncLoadAsset(asset_path, sprite_type, false) }
-        {
-            if !sprite_obj.0.is_null() {
-                let sprite = UnityEngine_Sprite(sprite_obj.0);
-                if let Ok(tex) = unsafe { sprite.get_texture() } {
-                    if !tex.0.is_null() {
-                        return Ok(tex);
-                    }
-                }
-            }
-        }
-    }
-
-    let texture_type = get_type_handle(UnityEngine_Texture2D::ffi_name())?;
-    let texture_obj =
-        unsafe { RPG_Client_CachedAssetLoader::SyncLoadAsset(asset_path, texture_type, false) }?;
-    if texture_obj.0.is_null() {
-        return Err(anyhow!("SyncLoadAsset returned null for both Sprite and Texture2D"));
-    }
-
-    Ok(UnityEngine_Texture2D(texture_obj.0))
-}
-
 pub fn get_monster_png_bytes(monster_id: u32) -> Result<Vec<u8>> {
     unsafe {
         let monster_row = RPG_GameCore_MonsterTemplateExcelTable::GetData(monster_id)?;
-        let tex = load_texture_from_asset(monster_row.RoundIconPath()?)?;
+        let type_handle = get_type_handle(UnityEngine_Sprite::ffi_name())?;
+
+        let sprite = RPG_Client_CachedAssetLoader::SyncLoadAsset(
+            monster_row.RoundIconPath()?,
+            type_handle,
+            false,
+        )?;
+        let sprite = UnityEngine_Sprite(sprite.0);
+        let tex = sprite.get_texture()?;
 
         render_texture_to_png_bytes(tex)
     }
@@ -484,7 +453,15 @@ pub fn get_avatar_png_bytes(avatar_id: u32) -> Result<Vec<u8>> {
             avatar_row.AvatarSideIconPath()?.to_string()
         );
 
-        let tex = load_texture_from_asset(avatar_row.AvatarSideIconPath()?)?;
+        let type_handle = get_type_handle(UnityEngine_Sprite::ffi_name())?;
+
+        let sprite = RPG_Client_CachedAssetLoader::SyncLoadAsset(
+            avatar_row.AvatarSideIconPath()?,
+            type_handle,
+            false,
+        )?;
+        let sprite = UnityEngine_Sprite(sprite.0);
+        let tex = sprite.get_texture()?;
 
         render_texture_to_png_bytes(tex)
     }
@@ -500,7 +477,15 @@ pub fn get_property_icon_png_bytes(property_name: &str) -> Result<Vec<u8>> {
         let row = RPG_GameCore_AvatarPropertyExcelTable::GetData(property_type)?;
         let icon_path = row.IconPath()?;
 
-        let tex = load_texture_from_asset(icon_path)?;
+        let type_handle = get_type_handle(UnityEngine_Sprite::ffi_name())?;
+        
+        let sprite = RPG_Client_CachedAssetLoader::SyncLoadAsset(
+            icon_path,
+            type_handle,
+            false,
+        )?;
+        let sprite = UnityEngine_Sprite(sprite.0);
+        let tex = sprite.get_texture()?;
 
         render_texture_to_png_bytes(tex)
     }

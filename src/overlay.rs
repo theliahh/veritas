@@ -66,8 +66,8 @@ pub fn get_vtable() -> Result<Box<[usize; 205]>> {
             WS_OVERLAPPEDWINDOW,
             0,
             0,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
+            100,
+            100,
             None,
             None,
             Some(window_class.hInstance),
@@ -87,8 +87,8 @@ pub fn get_vtable() -> Result<Box<[usize; 205]>> {
         };
 
         let buffer_desc = DXGI_MODE_DESC {
-            Width: 0,
-            Height: 0,
+            Width: 100,
+            Height: 100,
             RefreshRate: refresh_rate,
             Format: DXGI_FORMAT_R8G8B8A8_UNORM,
             ScanlineOrdering: DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED,
@@ -106,7 +106,6 @@ pub fn get_vtable() -> Result<Box<[usize; 205]>> {
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
             BufferCount: 1,
             OutputWindow: window,
-            // Windowed avoids fullscreen transitions on the dummy window.
             Windowed: true.into(),
             SwapEffect: DXGI_SWAP_EFFECT_DISCARD,
             Flags: DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH.0 as u32,

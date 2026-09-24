@@ -162,9 +162,6 @@ impl RPG_GameCore_MonsterDataComponent {
     #[il2cpp_method(name = "GetMonsterID", args = [])]
     pub fn get_monster_id(&self) -> u32 {}
 
-    #[il2cpp_method(name = "GetMonsterTemplateID", args = [])]
-    pub fn get_monster_template_id(&self) -> u32 {}
-
     #[il2cpp_field(name = "_OwnerRef")]
     pub fn _OwnerRef(&self) -> RPG_GameCore_GameEntity {}
 
@@ -717,9 +714,6 @@ pub struct RPG_GameCore_GameEntity;
 impl RPG_GameCore_GameEntity {
     #[il2cpp_method(name = "GetComponent", args = ["System.Type"])]
     pub fn get_component(&self, ty: System_RuntimeType) -> RPG_GameCore_GameComponentBase {}
-
-	#[il2cpp_method(name = "GetComponent", args = ["System.RuntimeTypeHandle"])]
-	pub fn get_component_by_type_handle(&self, ty: Il2CppType) -> RPG_GameCore_GameComponentBase {}
 
     #[il2cpp_field(name = "_ComponentList")]
     pub fn _ComponentList(&self) -> Il2CppArray {}
