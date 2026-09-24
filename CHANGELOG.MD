@@ -1,3 +1,9 @@
+# 0.2.53 - 2026-09-24
+  - Fixed for 4.5.0
+  - Fixed crash when entering battle
+  - Fixed damage not being recorded
+  - Fixed random crash in the overlay
+
 # 0.2.52 - 2026-06-23
   - Fixed for 4.2.54
 
