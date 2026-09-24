@@ -1,26 +1,21 @@
-use crate::{get_module_handle, kreide, logging, overlay, server, subscribers};
+use crate::{get_module_handle, logging, overlay, server, subscribers};
 use ctor::ctor;
 use egui_notify::Toast;
 use il2cpp_runtime::api::ApiIndexTable;
-use windows::Win32::Foundation::{GetLastError, HMODULE, MAX_PATH};
 use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows::Win32::System::ProcessStatus::{GetModuleInformation, MODULEINFO};
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::core::w;
-use std::ffi::{OsString, c_void};
-use std::io::{Cursor, Write};
-use std::os::windows::ffi::OsStringExt;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::ffi::c_void;
+use std::io::Cursor;
 use std::{
     thread::{self},
     time::Duration,
 };
-use windows::Win32::System::LibraryLoader::{GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW, GetModuleHandleExA, GetModuleHandleW, GetProcAddress};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use anyhow::{Context, Result, anyhow};
 
 #[ctor]
-#[cfg(not(test))]
 fn entry() {
     thread::spawn(|| init());
 }
@@ -43,11 +38,17 @@ fn init() {
             toasts.push(Toast::success(msg));
         }
         Err(e) => {
-            let err = format!("Core failed to initialize and has been disabled: {e}");
-            log::error!("Core failed to initialize and has been disabled: {:#}", e);
+            let err_tip = format!("Plugin is incompatible with this version of the game. Check {}/releases for updates.", env!("CARGO_PKG_REPOSITORY"));
+            let mut toast = Toast::error(err_tip);
+            toast.duration(None);
+            toasts.push(toast);
+
+            let err = format!("Core has been disabled: {}", e);
+            log::error!("{}", err);
             let mut toast = Toast::error(err);
             toast.duration(None);
             toasts.push(toast);
+
         }
     };
 
@@ -110,16 +111,10 @@ fn get_il2cpp_table_offset() -> Result<usize> {
             .context("Failed to scan for il2cpp pattern")?;
         let instruction_offset = *locs
             .get(0)
-            .context("Pattern not found in UnityPlayer module")?;
-        let addr = instruction_offset + module.0 as usize;
+            .context("Pattern not found in UnityPlayer module")?
+            + module.0 as usize;
 
-        let displacement_bytes: [u8; 4] = buffer
-            .get(instruction_offset + 3..instruction_offset + 7)
-            .context("Pattern displacement bytes were out of bounds")?
-            .try_into()
-            .map_err(|_| anyhow!("Pattern displacement did not contain 4 bytes"))?;
-        let displacement = i32::from_le_bytes(displacement_bytes) as isize;
-        let qword_addr = ((addr + 7) as isize + displacement) as usize;
+        let qword_addr = addr + 7 + std::ptr::read_unaligned((addr + 3) as *const i32) as usize;
         Ok(qword_addr)
     }
 }
@@ -202,6 +197,7 @@ fn setup_subscribers() -> anyhow::Result<()> {
             il2cpp_class_get_namespace: 39,
             il2cpp_class_get_parent: 40,
             il2cpp_class_from_type: 49,
+            il2cpp_class_get_type: 51,
             il2cpp_domain_get: 63,
             il2cpp_domain_get_assemblies: 65,
             il2cpp_field_get_name: 73,

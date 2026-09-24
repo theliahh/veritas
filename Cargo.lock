@@ -1408,7 +1408,7 @@ dependencies = [
 [[package]]
 name = "edio11"
 version = "0.1.1"
-source = "git+https://github.com/hessiser/edio11-rs.git?rev=fd1384c#fd1384c016dc04b5902eb7818bafb3d62ec65082"
+source = "git+https://github.com/theliahh/edio11-rs.git?rev=c69a210#c69a210d4e9e73f4bf647ef4e5535ce289e0fd31"
 dependencies = [
  "arboard",
  "dark-light",
@@ -2753,7 +2753,7 @@ dependencies = [
 [[package]]
 name = "il2cpp-macros"
 version = "0.1.0"
-source = "git+https://github.com/NightKoneko/il2cpp-rust.git?branch=hsr-4.2.51-fixes#df4375adb3a6eca02afe4e7d626d6861580e1b2c"
+source = "git+https://github.com/hessiser/il2cpp-rust.git?rev=51f8c1f#51f8c1f2ec14b405dae75dc9e6c4364af0b4064d"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -2764,7 +2764,7 @@ dependencies = [
 [[package]]
 name = "il2cpp-runtime"
 version = "0.1.0"
-source = "git+https://github.com/NightKoneko/il2cpp-rust.git?branch=hsr-4.2.51-fixes#df4375adb3a6eca02afe4e7d626d6861580e1b2c"
+source = "git+https://github.com/hessiser/il2cpp-rust.git?rev=51f8c1f#51f8c1f2ec14b405dae75dc9e6c4364af0b4064d"
 dependencies = [
  "il2cpp-macros",
  "log",
@@ -5762,11 +5762,12 @@ checksum = "eab68b56840f69efb0fefbe3ab6661499217ffdc58e2eef7c3f6f69835386322"
 
 [[package]]
 name = "veritas"
-version = "0.2.48"
+version = "0.2.52"
 dependencies = [
  "anyhow",
  "axum",
  "axum-server",
+ "cc",
  "chrono",
  "csv",
  "ctor",

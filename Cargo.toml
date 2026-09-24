@@ -3,7 +3,7 @@ name = "veritas"
 edition = "2024"
 license-file = "LICENSE"
 repository = "https://github.com/hessiser/veritas/"
-version = "0.2.48"
+version = "0.2.52"
 
 [package.metadata.i18n]
 available-locales = ["en", "fr", "es", "de", "it", "ja", "pt", "nl", "ru", "vi", "zh", "pl"]
@@ -20,7 +20,8 @@ crate-type = ["cdylib"]
 # UI
 egui = { version = "0.32.0", features = ["serde", "persistence"] }
 egui_plot = { version = "0.33.0", features = ["serde"] }
-edio11 = { git = "https://github.com/hessiser/edio11-rs.git", rev = "fd1384c" }
+# Fork of hessiser/edio11-rs with the render-thread/WndProc race fix.
+edio11 = { git = "https://github.com/theliahh/edio11-rs.git", rev = "c69a210" }
 egui-phosphor = { version = "0.10.0", features = ["bold"]}
 egui_colors = { version = "0.9.0", features = ["serde"] }
 egui-notify = "0.20.0"
@@ -67,7 +68,7 @@ widestring = "1.2.0"
 ron = "0.10.1"
 strum = { version = "0.28", features = ["derive"] }
 parse-changelog = { version = "0.6.12", default-features = false }
-il2cpp-runtime = { git = "https://github.com/NightKoneko/il2cpp-rust.git", branch = "hsr-4.2.51-fixes", features = ["log"] }
+il2cpp-runtime = { git = "https://github.com/hessiser/il2cpp-rust.git", rev = "51f8c1f" , features = ["log"]}
 image = "0.25.10"
 
 [dev-dependencies]
@@ -94,3 +95,4 @@ features = [
 
 [build-dependencies]
 winres = "0.1.12"
+cc = "1"

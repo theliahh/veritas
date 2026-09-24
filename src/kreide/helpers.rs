@@ -1,22 +1,26 @@
-use std::{collections::HashMap, ptr::null, sync::{LazyLock, Mutex, OnceLock}};
-use il2cpp_runtime::api::il2cpp_method_get_return_type;
+use std::{
+    collections::HashMap,
+    ffi::c_void,
+    ptr::null,
+    sync::{LazyLock, Mutex, OnceLock},
+};
 
 use crate::{
     kreide::types::{
-        RPG_Client_CachedAssetLoader, RPG_Client_UIGameEntityUtils, RPG_GameCore_AvatarExcelTable, RPG_GameCore_AvatarPropertyExcelTable, RPG_GameCore_AvatarPropertyType__Boxed, RPG_GameCore_BattleEventDataComponent, RPG_GameCore_EntityType, RPG_GameCore_GameComponentBase, RPG_GameCore_MonsterDataComponent, RPG_GameCore_MonsterTemplateExcelTable, RPG_GameCore_ServantDataComponent, UnityEngine_Graphics, UnityEngine_ImageConversion, UnityEngine_Rect, UnityEngine_RenderTexture, UnityEngine_Sprite, UnityEngine_Texture2D
+        RPG_Client_AvatarHelper, RPG_Client_CachedAssetLoader, RPG_Client_UIGameEntityUtils, RPG_GameCore_AttackType__Boxed, RPG_GameCore_AvatarExcelTable, RPG_GameCore_AvatarPropertyExcelTable, RPG_GameCore_AvatarPropertyType, RPG_GameCore_AvatarRow, RPG_GameCore_MonsterDataComponent, RPG_GameCore_MonsterTemplateExcelTable, RPG_GameCore_ServantDataComponent, UnityEngine_Graphics, UnityEngine_ImageConversion, UnityEngine_Rect, UnityEngine_RenderTexture, UnityEngine_Sprite, UnityEngine_Texture2D
     },
     models::types::{Avatar, Skill},
 };
 use anyhow::{Context, Result, anyhow};
 use function_name::named;
 use il2cpp_runtime::{
-    Il2CppObject, System_RuntimeType, get_cached_class,
-    types::{Il2CppString, System_Enum, System_Int32__Boxed, System_Type},
+    Il2CppClass, Il2CppObject, System_RuntimeType, get_cached_class,
+    types::{Il2CppString, System_Enum, System_Type},
 };
 
 use super::types::{
     RPG_Client_TextID, RPG_Client_TextmapStatic,
-    RPG_GameCore_BattleInstance, RPG_GameCore_FixPoint, RPG_GameCore_FixPoint__Boxed, RPG_GameCore_GameEntity,
+    RPG_GameCore_BattleInstance, RPG_GameCore_GameEntity,
     RPG_GameCore_SkillData,
 };
 
@@ -32,32 +36,21 @@ fn sanitize_entity_name<S: AsRef<str>>(name: S) -> String {
 static AVATAR_CACHE: LazyLock<Mutex<HashMap<u32, Avatar>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-unsafe fn get_component_by_name(
-    entity: RPG_GameCore_GameEntity,
-    type_name: &str,
-) -> Result<RPG_GameCore_GameComponentBase> {
-    let class = get_cached_class(type_name)?;
-    Ok(unsafe { entity.get_component_by_type_handle(class.byval_arg())? })
-}
 
-pub fn get_textmap_content(hash: &RPG_Client_TextID) -> Result<String> {
-    Ok(unsafe { RPG_Client_TextmapStatic::get_text(hash, null()) }.map(|s| s.to_string())?)
+#[named]
+pub fn get_avatar_data_from_id(avatar_id: u32) -> Result<RPG_GameCore_AvatarRow> {
+    log::debug!(function_name!());
+    Ok(unsafe { RPG_GameCore_AvatarExcelTable::GetData(avatar_id)? })
 }
 
 #[named]
 pub unsafe fn get_avatar_from_id(avatar_id: u32) -> Result<Avatar> {
     log::debug!(function_name!());
 
-    if let Some(avatar) = AVATAR_CACHE
-        .lock()
-        .ok()
-        .and_then(|cache| cache.get(&avatar_id).cloned())
-    {
-        return Ok(avatar);
-    }
+    let avatar_data = get_avatar_data_from_id(avatar_id)
+        .context(format!("AvatarData with id {avatar_id} was null"))?;
 
-    let data = unsafe { RPG_GameCore_AvatarExcelTable::GetData(avatar_id)? };
-    let avatar_name = get_textmap_content(&*data.AvatarName()?)?;
+    let avatar_name = unsafe { RPG_Client_AvatarHelper::GetAvatarName(avatar_id)?.to_string() };
 
     let avatar = Avatar {
         id: avatar_id,
@@ -111,9 +104,9 @@ pub unsafe fn get_avatar_from_entity(entity: RPG_GameCore_GameEntity) -> Result<
 pub unsafe fn get_avatar_from_owner_entity(entity: RPG_GameCore_GameEntity) -> Result<Avatar> {
     log::debug!(function_name!());
 
-    if entity.0.is_null() {
-        return Err(anyhow!("Owner entity was null"));
-    }
+    let name = unsafe {
+        RPG_Client_AvatarHelper::GetAvatarName(id)?.to_string()
+    };
 
     match *entity._EntityType()? {
         RPG_GameCore_EntityType::Avatar => unsafe { get_avatar_from_entity(entity) },
@@ -279,47 +272,6 @@ pub unsafe fn get_monster_from_runtime_id(
     }
 }
 
-static FIXPOINT_TO_DOUBLE_VA: OnceLock<usize> = OnceLock::new();
-
-fn get_fixpoint_op_explicit_double_va() -> Result<usize> {
-    if let Some(va) = FIXPOINT_TO_DOUBLE_VA.get() {
-        return Ok(*va);
-    }
-    let method = get_cached_class("RPG.GameCore.FixPoint")?
-        .methods()
-        .into_iter()
-        .find(|m| {
-            if m.name() != "op_Explicit" || m.args_cnt() != 1 {
-                return false;
-            }
-            if m.arg_type_formatted(0) != "RPG.GameCore.FixPoint" {
-                return false;
-            }
-            let ret = il2cpp_method_get_return_type(*m).alias_name();
-            ret == "double" || ret == "System.Double"
-        })
-        .ok_or_else(|| anyhow!("op_Explicit(FixPoint)->double not found on RPG.GameCore.FixPoint"))?;
-
-    let va = method.va() as usize;
-    let _ = FIXPOINT_TO_DOUBLE_VA.set(va);
-    Ok(va)
-}
-#[named]
-pub fn fixpoint_to_raw(fixpoint: &RPG_GameCore_FixPoint) -> f64 {
-    log::debug!(function_name!());
-    match get_fixpoint_op_explicit_double_va() {
-        Ok(va) => {
-            let op_explicit: unsafe extern "fastcall" fn(RPG_GameCore_FixPoint) -> f64 =
-                unsafe { std::mem::transmute(va as *const ()) };
-            unsafe { op_explicit(*fixpoint) }
-        }
-        Err(e) => {
-            log::error!("fixpoint_to_raw: op_Explicit(FixPoint)->double VA unavailable: {e}");
-            0.0
-        }
-    }
-}
-
 pub fn is_obfuscated_name<S: AsRef<str>>(name: S) -> bool {
     let name = name.as_ref();
     name.len() == 11 && name.chars().all(|c| c.is_ascii_uppercase())
@@ -332,12 +284,125 @@ pub fn get_type_handle<S: AsRef<str>>(type_name: S) -> Result<System_Type> {
     Ok(unsafe { System_Type::get_type_from_handle(ty)? })
 }
 
+unsafe extern "C" {
+    // src/guard.c
+    fn veritas_guarded_call2(
+        method: *const c_void,
+        arg0: *const c_void,
+        arg1: *const c_void,
+        result: *mut *const c_void,
+        code: *mut u32,
+        il2cpp_exception: *mut *const c_void,
+    ) -> i32;
+}
+
+/// "ExceptionType: message" for a managed Il2CppException*.
+unsafe fn describe_il2cpp_exception(exception: *const c_void) -> String {
+    // Il2CppException (Unity 2019.4, .NET 4.x): Il2CppObject header, className, message.
+    let describe = || unsafe {
+        let class = Il2CppClass(*(exception as *const *const c_void));
+        let message = *(exception.byte_add(0x18) as *const *const c_void);
+        let message = if message.is_null() {
+            String::new()
+        } else {
+            Il2CppString(message).to_string()
+        };
+        format!("{}: {}", class.qualified_name(), message)
+    };
+    microseh::try_seh(describe).unwrap_or_else(|e| format!("<unreadable exception object: {e}>"))
+}
+
+/// Calls a two-argument static IL2CPP method through src/guard.c, so a managed exception
+/// comes back as an error. Uncaught, it would unwind into Rust and abort the whole game.
+unsafe fn guarded_call2(
+    method: usize,
+    arg0: *const c_void,
+    arg1: *const c_void,
+) -> Result<*const c_void> {
+    let mut result = null();
+    let mut code = 0u32;
+    let mut exception = null();
+    let status = unsafe {
+        veritas_guarded_call2(
+            method as *const c_void,
+            arg0,
+            arg1,
+            &mut result,
+            &mut code,
+            &mut exception,
+        )
+    };
+    if status == 0 {
+        return Ok(result);
+    }
+    Err(anyhow!(
+        "threw {}",
+        if exception.is_null() {
+            format!("exception code {code:#X}")
+        } else {
+            unsafe { describe_il2cpp_exception(exception) }
+        }
+    ))
+}
+
+fn enum_method(cache: &OnceLock<usize>, name: &str, arg_types: Vec<&str>) -> Result<usize> {
+    if let Some(va) = cache.get() {
+        return Ok(*va);
+    }
+    let method = get_cached_class("System.Enum")?.find_method(name, arg_types)?;
+    Ok(*cache.get_or_init(|| method.va() as usize))
+}
+
+// Highest underlying value probed when building an enum's name table.
+const ENUM_PROBE_LIMIT: i32 = 4096;
+
+/// Value of the named member of an IL2CPP enum.
+///
+/// On game 4.5.0, `System.Enum.Parse` rejects every string Veritas creates ("Must specify
+/// valid information for parsing in the string"), so this instead builds a name → value
+/// table per enum with `Enum.ToObject` + `Enum.GetName`, which only pass numbers in.
+pub unsafe fn enum_value(type_name: &str, member: &str) -> Result<i32> {
+    static TABLES: LazyLock<Mutex<HashMap<String, HashMap<String, i32>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    static TO_OBJECT: OnceLock<usize> = OnceLock::new();
+    static GET_NAME: OnceLock<usize> = OnceLock::new();
+
+    let mut tables = TABLES.lock().unwrap_or_else(|e| e.into_inner());
+    if !tables.contains_key(type_name) {
+        let to_object = enum_method(&TO_OBJECT, "ToObject", vec!["System.Type", "int"])?;
+        let get_name = enum_method(&GET_NAME, "GetName", vec!["System.Type", "object"])?;
+        let ty = get_type_handle(type_name)?;
+
+        let mut table = HashMap::new();
+        for value in 0..=ENUM_PROBE_LIMIT {
+            let boxed = unsafe { guarded_call2(to_object, ty.0, value as usize as *const c_void) }
+                .with_context(|| format!("System.Enum.ToObject({type_name}, {value})"))?;
+            let name = unsafe { guarded_call2(get_name, ty.0, boxed) }
+                .with_context(|| format!("System.Enum.GetName({type_name}, {value})"))?;
+            if !name.is_null() {
+                table.insert(Il2CppString(name).to_string(), value);
+            }
+        }
+        log::debug!("Built {type_name} value table: {} members", table.len());
+        tables.insert(type_name.to_string(), table);
+    }
+
+    tables[type_name]
+        .get(member)
+        .copied()
+        .ok_or_else(|| anyhow!("{type_name} has no member named {member}"))
+}
+
+// UnityEngine.RenderTextureFormat.Default / UnityEngine.RenderTextureReadWrite.Linear.
+// Fixed Unity API values; parsing them at runtime throws on game 4.5.0.
+const RENDER_TEXTURE_FORMAT_DEFAULT: i32 = 7;
+const RENDER_TEXTURE_READ_WRITE_LINEAR: i32 = 1;
+
 /// Common texture rendering pipeline: texture → render target → readable texture → PNG bytes
 unsafe fn render_texture_to_png_bytes(tex: UnityEngine_Texture2D) -> Result<Vec<u8>> {
     unsafe {
-        // RenderTextureFormat.Default = 7, RenderTextureReadWrite.Linear = 1
-        let default_format: i32 = 7;
-        let rw_format: i32 = 1;
+        let (default_format, rw_format) =
+            (RENDER_TEXTURE_FORMAT_DEFAULT, RENDER_TEXTURE_READ_WRITE_LINEAR);
 
         let render_tex = UnityEngine_RenderTexture::GetTemporary(
             tex.as_base().get_width()?,
@@ -427,16 +492,44 @@ pub fn get_avatar_png_bytes(avatar_id: u32) -> Result<Vec<u8>> {
 
 pub fn get_property_icon_png_bytes(property_name: &str) -> Result<Vec<u8>> {
     unsafe {
-        let property_type = RPG_GameCore_AvatarPropertyType__Boxed(System_Enum::parse(
-            get_type_handle("RPG.GameCore.AvatarPropertyType")?,
-            Il2CppString::new(property_name)?,
+        let property_type: RPG_GameCore_AvatarPropertyType = std::mem::transmute(enum_value(
+            "RPG.GameCore.AvatarPropertyType",
+            property_name,
         )?);
-        
-        let row = RPG_GameCore_AvatarPropertyExcelTable::GetData(*property_type)?;
+
+        let row = RPG_GameCore_AvatarPropertyExcelTable::GetData(property_type)?;
         let icon_path = row.IconPath()?;
 
         let tex = load_texture_from_asset(icon_path)?;
 
         render_texture_to_png_bytes(tex)
+    }
+}
+
+pub fn dump_avatar_png_bytes(avatar_id: u32, png_bytes: &[u8]) -> Result<()> {
+    use std::fs;
+    let out_dir = std::env::current_dir()?.join("avatar_png_dumps");
+    fs::create_dir_all(&out_dir)?;
+    let out_path = out_dir.join(format!("{}.png", avatar_id));
+    fs::write(&out_path, png_bytes)?;
+
+    log::info!("Saved avatar PNG dump: {}", out_path.display());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guarded_call_catches_exception() {
+        // Calling address 1 faults; the guard must report it instead of crashing.
+        let (mut result, mut code, mut exception) = (null(), 0u32, null());
+        let status = unsafe {
+            veritas_guarded_call2(1 as *const c_void, null(), null(), &mut result, &mut code, &mut exception)
+        };
+        assert_eq!(status, 1);
+        assert_eq!(code, 0xC0000005);
+        assert!(exception.is_null());
     }
 }

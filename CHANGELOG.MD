@@ -1,3 +1,21 @@
+# 0.2.52 - 2026-06-23
+  - Fixed for 4.2.54
+
+# 0.2.51 - 2026-06-03
+  - Fixed bug in updater not detecting updates
+
+# 0.2.50 - 2026-06-03
+  - Fixed bug in overkill calculation
+  - Fixed bug with not all attack types displaying and added Assist attack type
+  - Added visual for overkill damage
+  - Visual fixes for Character Damage window
+  - Removed Damage Distribution Pie, Damage Bars, Real-Time Damage
+
+# 0.2.49 - 2026-06-02
+  - Fixed for 4.3.51
+  - Added badge for Character Legend And Enemy Stats window
+  - Added percentage to Character Damage window
+
 # 0.2.48 - 2026-05-01
   - Fixed for 4.2.51
   - Added Character Damage window

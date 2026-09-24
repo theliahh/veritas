@@ -1,5 +1,5 @@
 ﻿use crate::{kreide::types::RPG_GameCore_AvatarPropertyType, ui::app::{DamageBarValue, DamageBreakdownChart, DamageBreakdownScope, GraphUnit}};
-use egui::{Align, Align2, Color32, FontId, Frame, Layout, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2};
+use egui::{Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextStyle, Ui, Vec2};
 use egui_extras::Column;
 use egui_plot::{Bar, BarChart, Line, Plot, PlotPoints, Polygon};
 
@@ -13,7 +13,6 @@ use super::{app::App, helpers};
 
 pub struct PieSegment {
     pub points: Vec<[f64; 2]>,
-    pub value: f64,
 }
 
 struct DamagePortraitRow {
@@ -22,61 +21,11 @@ struct DamagePortraitRow {
     dpav: f64,
     effective_damage: f64,
     overkill_damage: f64,
+    overkill_dpav: f64,
     percentage: f64,
 }
 
 impl App {
-    pub fn show_damage_distribution_widget(&mut self, ui: &mut Ui) {
-        let available = ui.available_size();
-
-        Plot::new("damage_pie")
-            // .legend(
-            //     Legend::default()
-            //         .position(self.config.legend_position)
-            //         .text_style(self.config.legend_text_style.clone()),
-            // )
-            .height(available.y)
-            .width(available.x)
-            .data_aspect(1.0)
-            .clamp_grid(true)
-            .show_grid(false)
-            .show_background(false)
-            .show_axes([false; 2])
-            // .allow_drag(false)
-            // .allow_zoom(false)
-            .allow_scroll(false)
-            .show(ui, |plot_ui: &mut egui_plot::PlotUi<'_>| {
-                let battle_context = BattleContext::get_instance();
-
-                let total_damage = battle_context.total_damage as f64;
-                if total_damage > 0.0 {
-                    let segments = create_pie_segments(
-                        &battle_context.real_time_damages,
-                        &battle_context.avatar_lineup,
-                    );
-                    for (avatar, segment, i) in segments {
-                        let color = helpers::get_character_color(i);
-                        // let percentage = segment.value / total_damage * 100.0;
-
-                        let plot_points = PlotPoints::new(segment.points);
-                        let polygon = Polygon::new("Damage Pie", plot_points)
-                            .stroke(Stroke::new(1.5, color))
-                            .fill_color(color.linear_multiply(self.config.pie_chart_opacity))
-                            .id(avatar.name.clone());
-                        // .name(format!(
-                        //     "{}: {:.0}% | {} DMG | {:.0} DPAV",
-                        //     avatar.name,
-                        //     percentage,
-                        //     helpers::format_damage(segment.value),
-                        //     segment.value / battle_context.action_value
-                        // ));
-
-                        plot_ui.polygon(polygon);
-                    }
-                }
-            });
-    }
-
     pub fn show_character_legend(&mut self, ui: &mut Ui) {
         let battle_context = &BattleContext::get_instance();
 
@@ -145,7 +94,7 @@ impl App {
                             Layout::centered_and_justified(egui::Direction::LeftToRight),
                             |ui| {
                                 if i == battle_context.avatar_lineup.len() {
-                                    ui.label(t!("Total"));
+                                    ui.label("Σ");
                                 } else {
                                     // Load avatar image with caching, display name if loading fails
                                     if let Some(handle) = helpers::load_avatar_image(
@@ -170,22 +119,39 @@ impl App {
                                         let text_pos = image_response.rect.right_bottom()
                                             - egui::vec2(0.0, 0.0);
                                         let percentage_text = format!("{percentage:.0}%");
-
-                                        // Text Shadow
-                                        ui.painter().text(
-                                            text_pos + egui::vec2(-1., 1.),
-                                            Align2::RIGHT_BOTTOM,
-                                            &percentage_text,
-                                            FontId::proportional(dim / 4.0),
-                                            Color32::BLACK,
+                                        let text_color = ui.visuals().text_color();
+                                        let area_color = ui
+                                            .visuals()
+                                            .extreme_bg_color
+                                            .gamma_multiply(0.75);
+                                        let badge_rounding = CornerRadius::same(2);
+                                        let badge_stroke = Stroke::new(
+                                            1.0,
+                                            ui.visuals().widgets.noninteractive.bg_stroke.color,
                                         );
 
-                                        ui.painter().text(
+                                        let painter = ui.painter();
+                                        let galley = painter.layout(percentage_text, FontId::proportional(dim / 4.0), text_color, 50.);
+                                        let size = galley.size();
+                                        let badge_width = 36.0;
+                                        let rect = Rect::from_min_max(
+                                            Pos2::new(text_pos.x - badge_width, text_pos.y - size.y),
                                             text_pos,
-                                            Align2::RIGHT_BOTTOM,
-                                            &percentage_text,
-                                            FontId::proportional(dim / 4.0),
-                                            Color32::WHITE,
+                                        );
+                                        painter.rect(
+                                            rect,
+                                            badge_rounding,
+                                            area_color,
+                                            badge_stroke,
+                                            StrokeKind::Middle,
+                                        );
+                                        painter.galley(
+                                            Pos2::new(
+                                                rect.center().x - size.x * 0.5,
+                                                rect.center().y - size.y * 0.5,
+                                            ),
+                                            galley,
+                                            text_color,
                                         );
                                     } else {
                                         ui.label(format!("{}", battle_context.avatar_lineup[i].name));
@@ -326,6 +292,7 @@ impl App {
 
     pub fn show_character_damage_widget(&mut self, ui: &mut Ui) {
         ui.spacing_mut().item_spacing = Vec2::new(8.0, 6.0);
+        ui.set_min_height(ui.available_height().max(250.0));
 
         let mut rows = {
             let battle_context = BattleContext::get_instance();
@@ -458,7 +425,7 @@ impl App {
                                 ui.vertical(|ui| {
                                     ui.set_min_width(185.0);
                                     ui.label(
-                                        RichText::new(helpers::format_damage(display_value))
+                                        RichText::new(format!("{} ({:.1}%)", helpers::format_damage(display_value), row.percentage))
                                             .size(if dark_mode { 20.0 } else { 18.0 })
                                             .strong()
                                             .color(primary_text),
@@ -468,6 +435,15 @@ impl App {
                                         ui,
                                         if max_value > 0.0 {
                                             display_value / max_value
+                                        } else {
+                                            0.0
+                                        },
+                                        if max_value > 0.0 {
+                                            let overkill_value = match self.state.damage_bar_value {
+                                                DamageBarValue::Damage => row.overkill_damage,
+                                                DamageBarValue::Dpav => row.overkill_dpav,
+                                            };
+                                            overkill_value / max_value
                                         } else {
                                             0.0
                                         },
@@ -876,24 +852,43 @@ impl App {
                                             0.0
                                         };
                                         let percentage_text = format!("{percentage:.0}%");
-
-                                        // Text Shadow
-                                        ui.painter().text(
-                                            text_pos + egui::vec2(-1., 1.),
-                                            Align2::RIGHT_BOTTOM,
-                                            &percentage_text,
-                                            FontId::proportional(dim / 4.0),
-                                            Color32::BLACK,
+                                        let text_color = ui.visuals().text_color();
+                                        let area_color = ui
+                                            .visuals()
+                                            .extreme_bg_color
+                                            .gamma_multiply(0.75);
+                                        let badge_rounding = CornerRadius::same(2);
+                                        let badge_stroke = Stroke::new(
+                                            1.0,
+                                            ui.visuals().widgets.noninteractive.bg_stroke.color,
                                         );
 
-                                        ui.painter().text(
+                                        let painter = ui.painter();
+                                        let galley = painter.layout(percentage_text, FontId::proportional(dim / 4.0), text_color, 50.);
+                                        let size = galley.size();
+                                        let badge_width = 36.0;
+                                        let rect = Rect::from_min_max(
+                                            Pos2::new(text_pos.x - badge_width, text_pos.y - size.y),
                                             text_pos,
-                                            Align2::RIGHT_BOTTOM,
-                                            &percentage_text,
-                                            FontId::proportional(dim / 4.0),
-                                            Color32::WHITE,
                                         );
-
+                                        painter.rect(
+                                            rect,
+                                            badge_rounding,
+                                            area_color,
+                                            badge_stroke,
+                                            StrokeKind::Middle,
+                                        );
+                                        painter.galley(
+                                            Pos2::new(
+                                                rect.center().x - size.x * 0.5,
+                                                rect.center().y - size.y * 0.5,
+                                            ),
+                                            galley,
+                                            text_color,
+                                        );
+                                    }
+                                    else {
+                                        ui.label(battle_context.enemies[i].name.clone());
                                     }
                                 },
                             );
@@ -954,22 +949,33 @@ fn create_bar_data(
     bar_data
 }
 
-fn draw_damage_meter(ui: &mut Ui, fill_ratio: f64, visuals: &egui::Visuals) {
-    let desired_size = Vec2::new(ui.available_width().clamp(110.0, 170.0), 12.0);
+fn draw_damage_meter(
+    ui: &mut Ui,
+    fill_ratio: f64,
+    overkill_ratio: f64,
+    visuals: &egui::Visuals,
+) {
+    let desired_size = Vec2::new(ui.available_width().max(110.0), 12.0);
     let (rect, _) = ui.allocate_exact_size(desired_size, Sense::hover());
     let painter = ui.painter_at(rect);
-    let track_fill = if visuals.dark_mode {
-        Color32::from_rgba_premultiplied(8, 10, 16, 220)
-    } else {
-        Color32::from_rgba_premultiplied(40, 42, 48, 80)
-    };
-    let track_stroke = if visuals.dark_mode {
-        Color32::from_rgba_premultiplied(255, 255, 255, 28)
-    } else {
-        Color32::from_rgba_premultiplied(0, 0, 0, 18)
-    };
+    let track_fill = visuals.widgets.noninteractive.bg_fill;
+    let track_stroke = visuals.widgets.inactive.bg_stroke.color;
     let fill = visuals.selection.bg_fill;
     let highlight = fill.gamma_multiply(if visuals.dark_mode { 1.15 } else { 0.92 });
+    let overkill_fill = if visuals.dark_mode {
+        Color32::from_rgba_premultiplied(
+            (fill.r() as f32 * 0.45) as u8,
+            (fill.g() as f32 * 0.45) as u8,
+            (fill.b() as f32 * 0.45) as u8,
+            245,
+        )
+    } else {
+        // lighter, slightly desaturated overlay for light themes
+        let r = ((fill.r() as f32 * 0.9) + 255.0 * 0.1) as u8;
+        let g = ((fill.g() as f32 * 0.9) + 255.0 * 0.1) as u8;
+        let b = ((fill.b() as f32 * 0.9) + 255.0 * 0.1) as u8;
+        Color32::from_rgba_premultiplied(r, g, b, 200)
+    };
 
     painter.rect_filled(rect, 5.0, track_fill);
     painter.rect_stroke(rect, 5.0, Stroke::new(1.0, track_stroke), StrokeKind::Inside);
@@ -984,6 +990,37 @@ fn draw_damage_meter(ui: &mut Ui, fill_ratio: f64, visuals: &egui::Visuals) {
         egui::pos2(rect.left() + rect.width() * clamped_ratio, rect.bottom()),
     );
     painter.rect_filled(fill_rect, 5.0, fill);
+
+    let clamped_overkill_ratio = overkill_ratio.clamp(0.0, fill_ratio).max(0.0) as f32;
+    if clamped_overkill_ratio > 0.0 {
+        let overkill_width = rect.width() * clamped_overkill_ratio;
+        let overkill_left = (fill_rect.right() - overkill_width).max(fill_rect.left());
+        let overkill_rect = egui::Rect::from_min_max(
+            egui::pos2(overkill_left, fill_rect.top()),
+            egui::pos2(fill_rect.right(), fill_rect.bottom()),
+        );
+        let overkill_rounding = if overkill_left <= fill_rect.left() {
+            CornerRadius::same(5)
+        } else {
+            CornerRadius {
+                nw: 0,
+                ne: 5,
+                sw: 0,
+                se: 5,
+            }
+        };
+        painter.rect_filled(overkill_rect, overkill_rounding, overkill_fill);
+
+        if overkill_left > fill_rect.left() {
+            painter.line_segment(
+                [
+                    egui::pos2(overkill_left, fill_rect.top() + 1.0),
+                    egui::pos2(overkill_left, fill_rect.bottom() - 1.0),
+                ],
+                Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+            );
+        }
+    }
 
     let highlight_y = fill_rect.top() + 1.5;
     painter.line_segment(
@@ -1018,6 +1055,11 @@ fn create_damage_portrait_rows(
                 },
                 effective_damage: (damage - overkill_damage).max(0.0),
                 overkill_damage,
+                overkill_dpav: if action_value > 0.0 {
+                    overkill_damage / action_value
+                } else {
+                    overkill_damage
+                },
                 percentage: if total_damage > 0.0 {
                     damage / total_damage * 100.0
                 } else {
@@ -1028,7 +1070,7 @@ fn create_damage_portrait_rows(
         .collect::<Vec<_>>()
 }
 
-const ORDERED_DAMAGE_TYPES: [RPG_GameCore_AttackType; 12] = [
+const ORDERED_DAMAGE_TYPES: [RPG_GameCore_AttackType; 13] = [
     RPG_GameCore_AttackType::Normal,
     RPG_GameCore_AttackType::BPSkill,
     RPG_GameCore_AttackType::Ultra,
@@ -1041,6 +1083,7 @@ const ORDERED_DAMAGE_TYPES: [RPG_GameCore_AttackType; 12] = [
     RPG_GameCore_AttackType::Servant,
     RPG_GameCore_AttackType::TrueDamage,
     RPG_GameCore_AttackType::ElationDamage,
+    RPG_GameCore_AttackType::Assist,
 ];
 
 fn aggregate_damage_by_category(breakdowns: &[DamageTypeBreakdown]) -> DamageTypeBreakdown {
@@ -1086,7 +1129,7 @@ fn draw_damage_category_grid(
 fn show_damage_category_pie_chart(ui: &mut Ui, breakdown: &DamageTypeBreakdown) {
     let chart_data = collect_damage_category_points(breakdown);
     let available = ui.available_size();
-    let chart_height = 220.0;
+    let chart_height = 240.0;
     let total_damage: f64 = chart_data.iter().map(|(_, _, damage)| *damage).sum();
 
     Plot::new("damage_type_breakdown_pie")
@@ -1241,26 +1284,9 @@ fn get_damage_category_color(category: &RPG_GameCore_AttackType) -> Color32 {
         RPG_GameCore_AttackType::Servant => Color32::from_rgb(149, 165, 166),
         RPG_GameCore_AttackType::TrueDamage => Color32::from_rgb(127, 140, 141),
         RPG_GameCore_AttackType::ElationDamage => Color32::from_rgb(255, 105, 180),
+        RPG_GameCore_AttackType::Assist => Color32::from_rgb(241, 148, 138),
         _ => Color32::from_rgb(189, 195, 199),
     }
-}
-
-fn create_pie_segments(
-    real_time_damages: &Vec<f64>,
-    avatars: &Vec<Avatar>,
-) -> Vec<(Avatar, PieSegment, usize)> {
-    let generic_segments = create_pie_segments_from_values(real_time_damages);
-    let mut segments = Vec::new();
-
-    for (i, (avatar, segment)) in avatars.iter().zip(generic_segments.into_iter()).enumerate() {
-        segments.push((
-            avatar.clone(),
-            segment,
-            i,
-        ));
-    }
-
-    segments
 }
 
 fn create_pie_segments_from_values(values: &[f64]) -> Vec<PieSegment> {
@@ -1279,7 +1305,6 @@ fn create_pie_segments_from_values(values: &[f64]) -> Vec<PieSegment> {
 
         segments.push(PieSegment {
             points: create_pie_slice(start_angle, end_angle),
-            value: *damage,
         });
 
         start_angle = end_angle;

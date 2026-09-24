@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 
 use crate::{
-    kreide::types::{RPG_GameCore_AbilityProperty, RPG_GameCore_AttackType},
+    kreide::types::{RPG_GameCore_AbilityProperty::{self, Attack}, RPG_GameCore_AttackType},
     models::{events::*, packets::Packet, types::*},
     server,
 };
@@ -39,6 +39,7 @@ pub(crate) fn display_damage_type(attack_type: &RPG_GameCore_AttackType) -> Stri
         RPG_GameCore_AttackType::Servant => "Servant",
         RPG_GameCore_AttackType::TrueDamage => "True",
         RPG_GameCore_AttackType::ElationDamage => "Elation",
+        RPG_GameCore_AttackType::Assist => "Assist",
         _ => other.as_str(),
     }
     .to_string()
@@ -520,9 +521,7 @@ impl BattleContext {
                 Event::OnDamage(e) => Self::handle_on_damage_event(e, battle_context),
                 Event::OnTurnBegin(e) => Self::handle_on_turn_begin_event(e, battle_context),
                 Event::OnTurnEnd => Self::handle_on_turn_end_event(battle_context),
-                Event::OnEntityDefeated(e) => {
-                    Self::handle_on_entity_defeated_event(e, battle_context)
-                }
+                Event::OnEntityDefeated(e) => Self::handle_on_entity_defeated_event(e, battle_context),
                 Event::OnBattleEnd => Self::handle_on_battle_end_event(battle_context),
                 Event::OnUseSkill(e) => Self::handle_on_use_skill_event(e, battle_context),
                 Event::OnUpdateWave(e) => Self::handle_on_update_wave_event(e, battle_context),

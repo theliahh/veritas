@@ -86,7 +86,7 @@ pub struct AppState {
     pub show_real_time_damage: bool,
     pub show_enemy_stats: bool,
     pub show_battle_metrics: bool,
-    pub should_hide: bool,
+    pub hide_ui: bool,
     pub graph_x_unit: GraphUnit,
     #[serde(default)]
     pub damage_bar_value: DamageBarValue,
@@ -158,7 +158,7 @@ impl Overlay for App {
                 });
         }
 
-        if !self.state.should_hide {
+        if !self.state.hide_ui {
             if self.state.show_menu {
                 self.show_menu(ctx);
             }
@@ -167,10 +167,7 @@ impl Overlay for App {
                 self.show_console_window(ctx);
             }
 
-            if self.state.show_damage_distribution {
-                self.show_damage_distribution_window(ctx);
-            }
-
+            // Show Damage Dist is removed
             if self.state.show_damage_type_breakdown {
                 self.show_damage_type_breakdown_window(ctx);
             }
@@ -179,17 +176,17 @@ impl Overlay for App {
                 self.show_character_legend_window(ctx);
             }
 
-            if self.state.show_damage_bars {
-                self.show_damage_bar_window(ctx);
-            }
+            // if self.state.show_damage_bars {
+            //     self.show_damage_bar_window(ctx);
+            // }
 
             if self.state.show_character_damage {
                 self.show_character_damage_window(ctx);
             }
 
-            if self.state.show_real_time_damage {
-                self.show_real_time_damage_window(ctx);
-            }
+            // if self.state.show_real_time_damage {
+            //     self.show_real_time_damage_window(ctx);
+            // }
 
             if self.state.show_battle_metrics {
                 self.show_battle_metrics_window(ctx);
@@ -200,12 +197,46 @@ impl Overlay for App {
             }
         }
 
+        // Render updater window independently when requested (doesn't require menu)
+        if self.state.show_updater_window && !self.state.show_menu {
+            let mut show_updater_window = self.state.show_updater_window;
+            let mut updater_window = egui::Window::new(format!(
+                "{} Updates",
+                egui_phosphor::bold::DOWNLOAD
+            ))
+            .id("updater_window_outside".into())
+            .open(&mut show_updater_window);
+
+            if self.state.center_updater_window {
+                let center = ctx.input(|input| input.screen_rect.center());
+                if let Some(size) = self.updater_window_last_size {
+                    let top_left = center - size * 0.5;
+                    updater_window = updater_window.current_pos(top_left);
+                    self.state.center_updater_window = false;
+                } else {
+                    updater_window = updater_window
+                        .pivot(egui::Align2::CENTER_CENTER)
+                        .current_pos(center);
+                }
+            }
+
+            if let Some(response) = updater_window.show(ctx, |ui| {
+                self.show_updater_window(ui);
+            }) {
+                self.updater_window_last_size = Some(response.response.rect.size());
+            }
+            self.state.show_updater_window = show_updater_window;
+            if !self.state.show_updater_window {
+                self.updater_hint = None;
+            }
+        }
+
         if ctx.input_mut(|i| i.consume_shortcut(&HIDE_UI_SHORTCUT)) {
-            self.state.should_hide = !self.state.should_hide;
+            self.state.hide_ui = !self.state.hide_ui;
         }
 
         if ctx.input_mut(|i| i.consume_shortcut(&SHOW_MENU_SHORTCUT)) {
-            if self.state.should_hide {
+            if self.state.hide_ui {
                 self.notifs.info(t!(
                     "`Hide UI` is still active. Use the `Hide UI` shortcut to unhide the UI."
                 ));
@@ -260,12 +291,12 @@ impl Overlay for App {
             match state {
                 crate::battle::BattleState::Started => {
                     if self.config.auto_showhide_ui {
-                        self.state.should_hide = false;
+                        self.state.hide_ui = false;
                     }
                 }
                 crate::battle::BattleState::Ended => {
                     if self.config.auto_showhide_ui {
-                        self.state.should_hide = true;
+                        self.state.hide_ui = true;
                     }
 
                     if self.state.auto_save_battle_data {
@@ -382,7 +413,7 @@ impl Overlay for App {
             _ => {}
         };
 
-        if !self.state.should_hide && self.state.show_menu {
+        if !self.state.hide_ui && self.state.show_menu {
             Some(WindowProcessOptions {
                 should_capture_all_input: true,
                 ..Default::default()
@@ -429,7 +460,7 @@ impl Default for AppState {
             show_real_time_damage: false,
             show_enemy_stats: false,
             show_battle_metrics: false,
-            should_hide: false,
+            hide_ui: false,
             graph_x_unit: GraphUnit::default(),
             damage_bar_value: DamageBarValue::default(),
             damage_breakdown_scope: DamageBreakdownScope::default(),
@@ -614,6 +645,10 @@ impl App {
 
         app.queue_update_check();
 
+        if app.update_config.prompt_beta {
+            app.state.show_updater_window = true;
+        }
+
         app
     }
 
@@ -638,6 +673,7 @@ impl App {
                         .send(Some(Update {
                             new_version: new_ver,
                             status: None,
+                            prerelease_only: false,
                         }))
                         .is_err()
                     {
@@ -650,6 +686,7 @@ impl App {
                         .send(Some(Update {
                             new_version: None,
                             status: Some(Status::Failed(e)),
+                            prerelease_only: false,
                         }))
                         .is_err()
                     {
@@ -658,6 +695,29 @@ impl App {
                 }
             }
         });
+
+        // Additionally detect a prerelease newer than current and notify as "prerelease only"
+        if !allow_prerelease {
+            let sender = self.update_inbox.sender();
+            RUNTIME.spawn(async move {
+                match Updater::new(env!("CARGO_PKG_VERSION"), true).check_update().await {
+                    Ok(Some(beta_ver)) => {
+                        if sender
+                            .send(Some(Update {
+                                new_version: Some(beta_ver),
+                                status: None,
+                                prerelease_only: true,
+                            }))
+                            .is_err()
+                        {
+                            log::error!("Failed to send prerelease hint to inbox");
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => log::error!("Prerelease detection failed: {e}"),
+                }
+            });
+        }
     }
 
     pub fn export_battle_data(&self, format: &str) -> Result<String, Box<dyn std::error::Error>> {
