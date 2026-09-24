@@ -1,16 +1,21 @@
-use std::{ptr::null, sync::LazyLock};
+use std::{
+    collections::HashMap,
+    ffi::c_void,
+    ptr::null,
+    sync::{LazyLock, Mutex, OnceLock},
+};
 
 use crate::{
     kreide::types::{
-        RPG_Client_AvatarHelper, RPG_Client_CachedAssetLoader, RPG_Client_UIGameEntityUtils, RPG_GameCore_AttackType__Boxed, RPG_GameCore_AvatarExcelTable, RPG_GameCore_AvatarPropertyExcelTable, RPG_GameCore_AvatarPropertyType__Boxed, RPG_GameCore_AvatarRow, RPG_GameCore_MonsterDataComponent, RPG_GameCore_MonsterTemplateExcelTable, RPG_GameCore_ServantDataComponent, UnityEngine_Graphics, UnityEngine_ImageConversion, UnityEngine_Rect, UnityEngine_RenderTexture, UnityEngine_Sprite, UnityEngine_Texture2D
+        RPG_Client_AvatarHelper, RPG_Client_CachedAssetLoader, RPG_Client_UIGameEntityUtils, RPG_GameCore_AttackType__Boxed, RPG_GameCore_AvatarExcelTable, RPG_GameCore_AvatarPropertyExcelTable, RPG_GameCore_AvatarPropertyType, RPG_GameCore_AvatarRow, RPG_GameCore_MonsterDataComponent, RPG_GameCore_MonsterTemplateExcelTable, RPG_GameCore_ServantDataComponent, UnityEngine_Graphics, UnityEngine_ImageConversion, UnityEngine_Rect, UnityEngine_RenderTexture, UnityEngine_Sprite, UnityEngine_Texture2D
     },
     models::types::{Avatar, Skill},
 };
 use anyhow::{Context, Result, anyhow};
 use function_name::named;
 use il2cpp_runtime::{
-    Il2CppObject, System_RuntimeType, get_cached_class,
-    types::{Il2CppString, System_Enum, System_Int32__Boxed, System_Type},
+    Il2CppClass, Il2CppObject, System_RuntimeType, get_cached_class,
+    types::{Il2CppString, System_Enum, System_Type},
 };
 
 use super::types::{
@@ -266,33 +271,125 @@ pub fn get_type_handle<S: AsRef<str>>(type_name: S) -> Result<System_Type> {
     Ok(unsafe { System_Type::get_type_from_handle(ty)? })
 }
 
-/// Extract render texture formats for texture-to-PNG conversion
-unsafe fn get_render_texture_formats() -> Result<(i32, i32)> {
-    unsafe {
-        let default_format = {
-            let value = System_Int32__Boxed(System_Enum::parse(
-                get_type_handle("UnityEngine.RenderTextureFormat")?,
-                Il2CppString::new("Default")?,
-            )?);
-            (*value).0
-        };
-
-        let rw_format = {
-            let value = System_Int32__Boxed(System_Enum::parse(
-                get_type_handle("UnityEngine.RenderTextureReadWrite")?,
-                Il2CppString::new("Linear")?,
-            )?);
-            (*value).0
-        };
-
-        Ok((default_format, rw_format))
-    }
+unsafe extern "C" {
+    // src/guard.c
+    fn veritas_guarded_call2(
+        method: *const c_void,
+        arg0: *const c_void,
+        arg1: *const c_void,
+        result: *mut *const c_void,
+        code: *mut u32,
+        il2cpp_exception: *mut *const c_void,
+    ) -> i32;
 }
+
+/// "ExceptionType: message" for a managed Il2CppException*.
+unsafe fn describe_il2cpp_exception(exception: *const c_void) -> String {
+    // Il2CppException (Unity 2019.4, .NET 4.x): Il2CppObject header, className, message.
+    let describe = || unsafe {
+        let class = Il2CppClass(*(exception as *const *const c_void));
+        let message = *(exception.byte_add(0x18) as *const *const c_void);
+        let message = if message.is_null() {
+            String::new()
+        } else {
+            Il2CppString(message).to_string()
+        };
+        format!("{}: {}", class.qualified_name(), message)
+    };
+    microseh::try_seh(describe).unwrap_or_else(|e| format!("<unreadable exception object: {e}>"))
+}
+
+/// Calls a two-argument static IL2CPP method through src/guard.c, so a managed exception
+/// comes back as an error. Uncaught, it would unwind into Rust and abort the whole game.
+unsafe fn guarded_call2(
+    method: usize,
+    arg0: *const c_void,
+    arg1: *const c_void,
+) -> Result<*const c_void> {
+    let mut result = null();
+    let mut code = 0u32;
+    let mut exception = null();
+    let status = unsafe {
+        veritas_guarded_call2(
+            method as *const c_void,
+            arg0,
+            arg1,
+            &mut result,
+            &mut code,
+            &mut exception,
+        )
+    };
+    if status == 0 {
+        return Ok(result);
+    }
+    Err(anyhow!(
+        "threw {}",
+        if exception.is_null() {
+            format!("exception code {code:#X}")
+        } else {
+            unsafe { describe_il2cpp_exception(exception) }
+        }
+    ))
+}
+
+fn enum_method(cache: &OnceLock<usize>, name: &str, arg_types: Vec<&str>) -> Result<usize> {
+    if let Some(va) = cache.get() {
+        return Ok(*va);
+    }
+    let method = get_cached_class("System.Enum")?.find_method(name, arg_types)?;
+    Ok(*cache.get_or_init(|| method.va() as usize))
+}
+
+// Highest underlying value probed when building an enum's name table.
+const ENUM_PROBE_LIMIT: i32 = 4096;
+
+/// Value of the named member of an IL2CPP enum.
+///
+/// On game 4.5.0, `System.Enum.Parse` rejects every string Veritas creates ("Must specify
+/// valid information for parsing in the string"), so this instead builds a name → value
+/// table per enum with `Enum.ToObject` + `Enum.GetName`, which only pass numbers in.
+pub unsafe fn enum_value(type_name: &str, member: &str) -> Result<i32> {
+    static TABLES: LazyLock<Mutex<HashMap<String, HashMap<String, i32>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    static TO_OBJECT: OnceLock<usize> = OnceLock::new();
+    static GET_NAME: OnceLock<usize> = OnceLock::new();
+
+    let mut tables = TABLES.lock().unwrap_or_else(|e| e.into_inner());
+    if !tables.contains_key(type_name) {
+        let to_object = enum_method(&TO_OBJECT, "ToObject", vec!["System.Type", "int"])?;
+        let get_name = enum_method(&GET_NAME, "GetName", vec!["System.Type", "object"])?;
+        let ty = get_type_handle(type_name)?;
+
+        let mut table = HashMap::new();
+        for value in 0..=ENUM_PROBE_LIMIT {
+            let boxed = unsafe { guarded_call2(to_object, ty.0, value as usize as *const c_void) }
+                .with_context(|| format!("System.Enum.ToObject({type_name}, {value})"))?;
+            let name = unsafe { guarded_call2(get_name, ty.0, boxed) }
+                .with_context(|| format!("System.Enum.GetName({type_name}, {value})"))?;
+            if !name.is_null() {
+                table.insert(Il2CppString(name).to_string(), value);
+            }
+        }
+        log::debug!("Built {type_name} value table: {} members", table.len());
+        tables.insert(type_name.to_string(), table);
+    }
+
+    tables[type_name]
+        .get(member)
+        .copied()
+        .ok_or_else(|| anyhow!("{type_name} has no member named {member}"))
+}
+
+// UnityEngine.RenderTextureFormat.Default / UnityEngine.RenderTextureReadWrite.Linear.
+// Fixed Unity API values; parsing them at runtime throws on game 4.5.0.
+const RENDER_TEXTURE_FORMAT_DEFAULT: i32 = 7;
+const RENDER_TEXTURE_READ_WRITE_LINEAR: i32 = 1;
 
 /// Common texture rendering pipeline: texture → render target → readable texture → PNG bytes
 unsafe fn render_texture_to_png_bytes(tex: UnityEngine_Texture2D) -> Result<Vec<u8>> {
     unsafe {
-        let (default_format, rw_format) = get_render_texture_formats()?;
+        let (default_format, rw_format) =
+            (RENDER_TEXTURE_FORMAT_DEFAULT, RENDER_TEXTURE_READ_WRITE_LINEAR);
 
         let render_tex = UnityEngine_RenderTexture::GetTemporary(
             tex.as_base().get_width()?,
@@ -372,12 +469,12 @@ pub fn get_avatar_png_bytes(avatar_id: u32) -> Result<Vec<u8>> {
 
 pub fn get_property_icon_png_bytes(property_name: &str) -> Result<Vec<u8>> {
     unsafe {
-        let property_type = RPG_GameCore_AvatarPropertyType__Boxed(System_Enum::parse(
-            get_type_handle("RPG.GameCore.AvatarPropertyType")?,
-            Il2CppString::new(property_name)?,
+        let property_type: RPG_GameCore_AvatarPropertyType = std::mem::transmute(enum_value(
+            "RPG.GameCore.AvatarPropertyType",
+            property_name,
         )?);
-        
-        let row = RPG_GameCore_AvatarPropertyExcelTable::GetData(*property_type)?;
+
+        let row = RPG_GameCore_AvatarPropertyExcelTable::GetData(property_type)?;
         let icon_path = row.IconPath()?;
 
         let type_handle = get_type_handle(UnityEngine_Sprite::ffi_name())?;
@@ -403,4 +500,21 @@ pub fn dump_avatar_png_bytes(avatar_id: u32, png_bytes: &[u8]) -> Result<()> {
 
     log::info!("Saved avatar PNG dump: {}", out_path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guarded_call_catches_exception() {
+        // Calling address 1 faults; the guard must report it instead of crashing.
+        let (mut result, mut code, mut exception) = (null(), 0u32, null());
+        let status = unsafe {
+            veritas_guarded_call2(1 as *const c_void, null(), null(), &mut result, &mut code, &mut exception)
+        };
+        assert_eq!(status, 1);
+        assert_eq!(code, 0xC0000005);
+        assert!(exception.is_null());
+    }
 }

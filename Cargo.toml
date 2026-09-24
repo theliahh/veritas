@@ -94,3 +94,8 @@ features = [
 
 [build-dependencies]
 winres = "0.1.12"
+cc = "1"
+
+# Local edio11 with the render-thread/WndProc race fix (../edio11-rs, branch fix-thread-race, c69a210).
+[patch."https://github.com/hessiser/edio11-rs.git"]
+edio11 = { path = "../edio11-rs" }

@@ -24,7 +24,6 @@ use il2cpp_runtime::api::il2cpp_field_get_type;
 use il2cpp_runtime::get_cached_class;
 use il2cpp_runtime::types::Il2CppString;
 use il2cpp_runtime::types::System_Enum;
-use il2cpp_runtime::types::System_Int32__Boxed;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::null;
@@ -232,12 +231,12 @@ fn on_damage(
         match attacker_team_value {
             RPG_GameCore_TeamType::TeamLight => {
                 let hp_initial = {
-                    let value = *System_Int32__Boxed(System_Enum::parse(
-                        get_type_handle("RPG.GameCore.AbilityProperty")?,
-                        Il2CppString::new(RPG_GameCore_AbilityProperty::CurrentHP.to_string())?,
-                    )?);
+                    let value = enum_value(
+                        "RPG.GameCore.AbilityProperty",
+                        &RPG_GameCore_AbilityProperty::CurrentHP.to_string(),
+                    )?;
 
-                    defender_ability.get_property(std::mem::transmute(value.0))?.to_double()?
+                    defender_ability.get_property(std::mem::transmute(value))?.to_double()?
                 };
                 let damage = damage.to_double()?;
                 let overkill_damage = if damage > hp_initial {
@@ -887,12 +886,10 @@ fn handle_hp_change(turn_based_ability_component: RPG_GameCore_TurnBasedAbilityC
     use std::string::ToString;
     safe_call!(unsafe {
         let property_kind = RPG_GameCore_AbilityProperty::CurrentHP.to_string();
-        let property = RPG_GameCore_AbilityProperty__Boxed(System_Enum::parse(
-            get_type_handle("RPG.GameCore.AbilityProperty")?,
-            Il2CppString::new(&property_kind)?,
-        )?);
+        let property: RPG_GameCore_AbilityProperty =
+            std::mem::transmute(enum_value("RPG.GameCore.AbilityProperty", &property_kind)?);
 
-        let property_value = turn_based_ability_component.get_property(*property)?.to_double()?;
+        let property_value = turn_based_ability_component.get_property(property)?.to_double()?;
             
         let entity = turn_based_ability_component.as_base()._OwnerRef()?;
         let entity_value: RPG_GameCore_EntityType = parse_il2cpp_enum(entity._EntityType()?)?;
