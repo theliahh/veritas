@@ -18,6 +18,7 @@ use il2cpp_runtime::Il2CppClass;
 use il2cpp_runtime::Il2CppObject;
 use il2cpp_runtime::System_RuntimeType;
 use il2cpp_runtime::api::il2cpp_class_get_fields;
+use il2cpp_runtime::api::il2cpp_class_get_parent;
 use il2cpp_runtime::api::il2cpp_field_get_name;
 use il2cpp_runtime::api::il2cpp_field_get_offset;
 use il2cpp_runtime::api::il2cpp_field_get_type;
@@ -41,15 +42,126 @@ unsafe fn get_elapsed_av(game_mode: RPG_GameCore_TurnBasedGameMode) -> Result<f6
     })
 }
 
-#[derive(Clone, Copy)]
 struct ComboFieldOffsets {
     turn_based_ability_component: usize,
     skill_character_component: usize,
-    ability_name_outer: usize,
-    ability_name_inner: usize,
+    // Obfuscated-typed fields; one of them holds the TaskContext. Its declared
+    // type does not match the runtime object (4.6.0), so it's picked at call time.
+    task_context_candidates: Vec<usize>,
 }
 
 static COMBO_FIELD_OFFSETS: OnceLock<ComboFieldOffsets> = OnceLock::new();
+
+const TASK_CONTEXT_CLASS: &str = "RPG.GameCore.TaskContext";
+const ABILITY_CONFIG_CLASS: &str = "RPG.GameCore.AbilityConfig";
+
+unsafe fn object_class(obj: *const c_void) -> Option<Il2CppClass> {
+    if obj.is_null() {
+        return None;
+    }
+    let class_ptr = *(obj as *const *const c_void);
+    (!class_ptr.is_null()).then(|| Il2CppClass(class_ptr))
+}
+
+unsafe fn class_parent(class: Il2CppClass) -> Option<Il2CppClass> {
+    let parent = il2cpp_class_get_parent(class, null());
+    (!parent.0.is_null()).then_some(parent)
+}
+
+unsafe fn is_class_or_subclass_of(class: Il2CppClass, target: &str) -> bool {
+    let mut current = Some(class);
+    while let Some(class) = current {
+        if class.qualified_name() == target {
+            return true;
+        }
+        current = class_parent(class);
+    }
+    false
+}
+
+/// Finds a field offset on `class` or any of its parents.
+unsafe fn find_field_offset_in_hierarchy(
+    class: Il2CppClass,
+    matches: impl Fn(&str, &str) -> bool,
+) -> Option<usize> {
+    let mut current = Some(class);
+    while let Some(class) = current {
+        let field_iter: *const c_void = null();
+        loop {
+            let field = il2cpp_class_get_fields(class, &field_iter);
+            if field.0.is_null() {
+                break;
+            }
+            let field_name = il2cpp_runtime::utils::cstr_to_str(il2cpp_field_get_name(field));
+            let field_type = il2cpp_field_get_type(field);
+            if matches(&field_name, &field_type.name()) {
+                return Some(il2cpp_field_get_offset(field) as usize);
+            }
+        }
+        current = class_parent(class);
+    }
+    None
+}
+
+unsafe fn read_ptr(obj: *const c_void, offset: usize) -> *const c_void {
+    *(obj.byte_offset(offset as isize) as *const *const c_void)
+}
+
+/// Resolves the ability name via TaskContext.SourceAbilityInst -> AbilityConfig.Name.
+unsafe fn resolve_combo_ability_name(
+    instance: *const c_void,
+    offsets: &ComboFieldOffsets,
+) -> Result<Il2CppString> {
+    let task_context = offsets
+        .task_context_candidates
+        .iter()
+        .map(|&offset| read_ptr(instance, offset))
+        .find(|&ptr| {
+            object_class(ptr).is_some_and(|class| is_class_or_subclass_of(class, TASK_CONTEXT_CLASS))
+        })
+        .context("on_combo found no TaskContext field")?;
+
+    let task_context_class = object_class(task_context).context("TaskContext has null class")?;
+    let source_ability_offset =
+        find_field_offset_in_hierarchy(task_context_class, |name, _| name == "SourceAbilityInst")
+            .context("Failed to find TaskContext.SourceAbilityInst")?;
+    let ability_instance = read_ptr(task_context, source_ability_offset);
+    let ability_instance_class =
+        object_class(ability_instance).context("on_combo resolved null SourceAbilityInst")?;
+
+    let ability_config_offset =
+        find_field_offset_in_hierarchy(ability_instance_class, |_, ty| ty == ABILITY_CONFIG_CLASS)
+            .or_else(|| {
+                find_field_offset_in_hierarchy(ability_instance_class, |_, ty| {
+                    ty.ends_with("AbilityConfig")
+                })
+            })
+            .with_context(|| {
+                format!(
+                    "Failed to find AbilityConfig field on {}",
+                    ability_instance_class.qualified_name()
+                )
+            })?;
+    let ability_config = read_ptr(ability_instance, ability_config_offset);
+    let ability_config_class =
+        object_class(ability_config).context("on_combo resolved null AbilityConfig")?;
+
+    let name_offset = find_field_offset_in_hierarchy(ability_config_class, |name, ty| {
+        name == "Name" && ty == Il2CppString::ffi_name()
+    })
+    .with_context(|| {
+        format!(
+            "Failed to find Name field on {}",
+            ability_config_class.qualified_name()
+        )
+    })?;
+    let ability_name = read_ptr(ability_config, name_offset);
+    if ability_name.is_null() {
+        return Err(anyhow!("on_combo resolved null ability name"));
+    }
+
+    Ok(Il2CppString(ability_name))
+}
 
 fn parse_il2cpp_enum<TObj, TEnum>(enum_obj: TObj) -> Result<TEnum>
 where
@@ -75,8 +187,7 @@ unsafe fn resolve_combo_field_offsets(class: Il2CppClass) -> Result<ComboFieldOf
     let field_iter_1: *const c_void = null();
     let mut turn_based_ability_component_offset = None;
     let mut skill_character_component_offset = None;
-    let mut ability_name_outer_offset = None;
-    let mut ability_name_inner_offset = None;
+    let mut task_context_candidates = Vec::new();
 
     loop {
         let field = il2cpp_class_get_fields(class, &field_iter_1);
@@ -90,22 +201,12 @@ unsafe fn resolve_combo_field_offsets(class: Il2CppClass) -> Result<ComboFieldOf
         } else if field_type.name() == RPG_GameCore_SkillCharacterComponent::ffi_name() {
             skill_character_component_offset = Some(il2cpp_field_get_offset(field) as usize);
         } else if is_obfuscated_name(field_type.name()) {
-            ability_name_outer_offset = Some(il2cpp_field_get_offset(field) as usize);
-
-            let field_iter_2: *const c_void = null();
-            loop {
-                let field_inner = il2cpp_class_get_fields(field_type.class(), &field_iter_2);
-                if field_inner.0.is_null() {
-                    break;
-                }
-
-                let field_inner_type = il2cpp_field_get_type(field_inner);
-                if field_inner_type.name() == Il2CppString::ffi_name() {
-                    ability_name_inner_offset = Some(il2cpp_field_get_offset(field_inner) as usize);
-                    break;
-                }
-            }
+            task_context_candidates.push(il2cpp_field_get_offset(field) as usize);
         }
+    }
+
+    if task_context_candidates.is_empty() {
+        return Err(anyhow!("Failed to find any on_combo TaskContext candidate field"));
     }
 
     Ok(ComboFieldOffsets {
@@ -113,23 +214,19 @@ unsafe fn resolve_combo_field_offsets(class: Il2CppClass) -> Result<ComboFieldOf
             .context("Failed to find TurnBasedAbilityComponent field offset")?,
         skill_character_component: skill_character_component_offset
             .context("Failed to find SkillCharacterComponent field offset")?,
-        ability_name_outer: ability_name_outer_offset
-            .context("Failed to find obfuscated ability-name container field offset")?,
-        ability_name_inner: ability_name_inner_offset
-            .context("Failed to find Il2CppString ability-name field offset")?,
+        task_context_candidates,
     })
 }
 
-unsafe fn get_combo_field_offsets(class: Il2CppClass) -> Result<ComboFieldOffsets> {
+unsafe fn get_combo_field_offsets(class: Il2CppClass) -> Result<&'static ComboFieldOffsets> {
     if let Some(offsets) = COMBO_FIELD_OFFSETS.get() {
-        return Ok(*offsets);
+        return Ok(offsets);
     }
 
     let offsets = unsafe { resolve_combo_field_offsets(class)? };
     let _ = COMBO_FIELD_OFFSETS.set(offsets);
     COMBO_FIELD_OFFSETS
         .get()
-        .copied()
         .ok_or_else(|| anyhow!("Failed to cache on_combo field offsets"))
 }
 
@@ -550,20 +647,8 @@ fn on_combo(instance: *const c_void, game_mode: RPG_GameCore_TurnBasedGameMode) 
         let skill_character_component =
             RPG_GameCore_SkillCharacterComponent(skill_character_component_ptr);
 
-        let ability_name_container =
-            *((instance.byte_offset(offsets.ability_name_outer as isize)) as *const *const c_void);
-        if ability_name_container.is_null() {
-            return Err(anyhow!("on_combo resolved null ability name container"));
-        }
-
-        let ability_name_ptr = *(ability_name_container
-            .byte_offset(offsets.ability_name_inner as isize)
-            as *const *const c_void);
-        if ability_name_ptr.is_null() {
-            return Err(anyhow!("on_combo resolved null ability name"));
-        }
-
-        let ability_name = Il2CppString(ability_name_ptr);
+        let ability_name = resolve_combo_ability_name(instance, offsets)?;
+        log::debug!("on_combo ability name: {}", ability_name);
 
         let entity = skill_character_component.as_base()._OwnerRef()?;
         let skill_owner = {
