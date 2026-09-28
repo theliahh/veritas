@@ -1,3 +1,7 @@
+# 0.2.54 - 2026-09-28
+  - Fixed for 4.6.0
+  - Fixed follow-up and combo skills not being recorded
+
 # 0.2.53 - 2026-09-24
   - Fixed for 4.5.0
   - Fixed crash when entering battle
